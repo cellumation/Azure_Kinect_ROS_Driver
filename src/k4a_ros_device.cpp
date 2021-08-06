@@ -18,6 +18,7 @@
 #include <sensor_msgs/image_encodings.h>
 #include <sensor_msgs/point_cloud2_iterator.h>
 #include <k4a/k4a.hpp>
+#include <libusb-1.0/libusb.h>
 
 // Project headers
 //
@@ -141,9 +142,16 @@ K4AROSDevice::K4AROSDevice(const NodeHandle& n, const NodeHandle& p)
 
     ROS_INFO_STREAM("Found " << k4a_device_count << " sensors");
 
+    uint32_t deviceId = 0;
     if (params_.sensor_sn != "")
     {
       ROS_INFO_STREAM("Searching for sensor with serial number: " << params_.sensor_sn);
+      if(getIndexForSerial(params_.sensor_sn, deviceId) != K4A_RESULT_SUCCEEDED)
+      {
+        ROS_ERROR("Failed to find a K4A device on USB Bus. Cannot continue.");
+        ros::requestShutdown();
+        return;
+      }
     }
     else
     {
@@ -151,43 +159,28 @@ K4AROSDevice::K4AROSDevice(const NodeHandle& n, const NodeHandle& p)
       ROS_WARN_COND(k4a_device_count > 1, "Multiple sensors connected! Picking first sensor.");
     }
 
-    for (uint32_t i = 0; i < k4a_device_count; i++)
+    try
     {
-      k4a::device device;
-      try
-      {
-        device = k4a::device::open(i);
-      }
-      catch (exception)
-      {
-        ROS_ERROR_STREAM("Failed to open K4A device at index " << i);
-        continue;
-      }
-
-      ROS_INFO_STREAM("K4A[" << i << "] : " << device.get_serialnum());
-
-      // Try to match serial number
-      if (params_.sensor_sn != "")
-      {
-        if (device.get_serialnum() == params_.sensor_sn)
-        {
-          k4a_device_ = std::move(device);
-          break;
-        }
-      }
-      // Pick the first device
-      else if (i == 0)
-      {
-        k4a_device_ = std::move(device);
-        break;
-      }
+      k4a_device_ = k4a::device::open(deviceId);
     }
-
-    if (!k4a_device_)
+    catch (exception)
     {
       ROS_ERROR("Failed to open a K4A device. Cannot continue.");
       ros::requestShutdown();
       return;
+    }
+
+    ROS_INFO_STREAM("K4A[" << deviceId << "] : " << k4a_device_.get_serialnum());
+
+    // Try to match serial number
+    if (params_.sensor_sn != "")
+    {
+      if (k4a_device_.get_serialnum() != params_.sensor_sn)
+      {
+        ROS_ERROR("Race condition detected,serial number of opened device does not match. Cannot continue.");
+        ros::requestShutdown();
+        return;
+      }
     }
 
     ROS_INFO_STREAM("K4A Serial Number: " << k4a_device_.get_serialnum());
@@ -288,6 +281,86 @@ K4AROSDevice::~K4AROSDevice()
   }
 #endif
 }
+
+k4a_result_t K4AROSDevice::getIndexForSerial(const std::string &serialNr, uint32_t &foundIndex)
+{
+    libusb_context *context = nullptr;
+    libusb_init(&context);
+
+    libusb_device **list;
+    ssize_t cnt = libusb_get_device_list(context, &list);
+    if (cnt < 0)
+    {
+        ROS_ERROR("Error, could not iterate USB devices");
+        libusb_exit(context);
+        return K4A_RESULT_FAILED;
+    }
+
+    const uint16_t MS_VID = 0x045e;
+    const uint16_t K4A_DEPTH_PID = 0x097c;
+
+
+    uint32_t curK4AIndexPlusOne = 0;
+    bool found = false;
+
+    for (ssize_t i = 0; i < cnt; i++) {
+        libusb_device *device = list[i];
+
+        libusb_device_descriptor desc;
+
+        libusb_get_device_descriptor(device, &desc);
+        if(desc.idVendor == MS_VID && desc.idProduct == K4A_DEPTH_PID)
+        {
+            curK4AIndexPlusOne++;
+
+            libusb_device_handle *handle;
+
+            if(libusb_open(device, &handle))
+            {
+                ROS_WARN_STREAM("Failed to open K4A USB device");
+                continue;
+            }
+
+            unsigned char buffer[255];
+            memset(buffer, 0, sizeof(buffer));
+            int len = libusb_get_string_descriptor_ascii(handle,
+                                                        desc.iSerialNumber,
+                                                        buffer,
+                                                        sizeof(buffer));
+
+            if(len <=0)
+            {
+                ROS_WARN_STREAM("Failed to get serial of K4A USB device");
+                libusb_close(handle);
+                continue;
+            }
+
+//             std::cout << "Len of serial is " <<  len << " serial C " << buffer << std::endl;
+
+            std::string devSerial = std::string(buffer, buffer + len);
+//             std::cout << "Serial is " << devSerial << std::endl;
+
+            if(devSerial == serialNr)
+            {
+                foundIndex = curK4AIndexPlusOne - 1;
+                found = true;
+                break;
+            }
+        }
+    }
+
+    libusb_free_device_list(list, 1);
+
+    /*exit libusb*/
+    libusb_exit(context);
+
+    if(found)
+    {
+        return K4A_RESULT_SUCCEEDED;
+    }
+    return K4A_RESULT_FAILED;
+}
+
 
 k4a_result_t K4AROSDevice::startCameras()
 {

@@ -52,6 +52,8 @@ class K4AROSDevice
 
   void getRgbCameraInfo(sensor_msgs::CameraInfo& camera_info);
 
+  k4a_result_t getIndexForSerial(const std::string &serialNr, uint32_t &foundIndex);
+
   k4a_result_t getDepthFrame(const k4a::capture& capture, sensor_msgs::ImagePtr& depth_frame, bool rectified);
 
   k4a_result_t getPointCloud(const k4a::capture& capture, sensor_msgs::PointCloud2Ptr& point_cloud);
